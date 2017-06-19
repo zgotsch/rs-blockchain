@@ -1,0 +1,14 @@
+[package]
+name = "naivechain-rs"
+version = "0.1.0"
+authors = ["Zach Gotsch <orbipedis@gmail.com>"]
+
+[dependencies]
+time = "0.1.37"
+rust-crypto = "0.2.36"
+byteorder = "1.0.0"
+base64 = "0.5.2"
+serde = "1.0.8"
+serde_derive = "1.0.8"
+bincode = "0.8.0"
+getopts = "0.2.14"
