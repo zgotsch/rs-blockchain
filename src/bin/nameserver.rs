@@ -7,6 +7,10 @@ use std::sync::Arc;
 use std::net::ToSocketAddrs;
 use std::sync::RwLock;
 
+extern crate naivechain_rs;
+use naivechain_rs::message::{ClientMessage, ClientToNameserverMessage, NameserverToClientMessage};
+use naivechain_rs::connection::Connection;
+
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -27,56 +31,29 @@ fn main() {
         match connection {
             Ok(stream) => {
                 let wallets = wallets.clone();
+                let connection = Connection::new(stream);
                 thread::spawn(|| {
-                    handle_client(stream, wallets);
+                    handle_client(connection, wallets);
                 });
             }
             Err(e) => writeln!(std::io::stderr(), "{}", e).expect("Couldn't write error"),
         }
     }
 }
-fn handle_client(mut stream: TcpStream, wallets: Arc<RwLock<Vec<SocketAddr>>>) {
-    let mut buffer = [0; 128];
-
+fn handle_client(mut connection: Connection, wallets: Arc<RwLock<Vec<SocketAddr>>>) {
     println!("connection accepted");
-    {
-        let wallets = wallets.read().unwrap();
-        stream.write(wallets.iter().map(|w| format!("{}", w)).collect::<Vec<String>>().join("\n").as_bytes()).unwrap();
-        stream.write("\n".as_bytes());
-    }
     loop {
-        if let Ok(read) = stream.read(&mut buffer) {
-            if read == 0 {
-                break;
-            }
-            if let Ok(s) = String::from_utf8(buffer[0..read].to_vec()) {
-                let mut tokens = s.split_whitespace();
-                match (tokens.next(), tokens.next()) {
-                    (Some("i"), Some(address)) => {
-                        // probably should get ip from client, not just blindly accept
-                        match address.to_string().to_socket_addrs() {
-                            Ok(mut addrs) => {
-                                let mut wallets = wallets.write().unwrap();
-                                let canonical_addr = addrs.next().expect("Resolved to no addresses");
-                                wallets.push(canonical_addr);
-
-                                stream.write(wallets.iter().map(|w| format!("{}\n", w)).collect::<Vec<String>>().join("").as_bytes()).unwrap();
-                            },
-                            Err(e) => {
-                                writeln!(std::io::stderr(), "{}", e).expect("Couldn't write error")
-                            }
-                        }
-                    }
-                    (Some("q"), _) => {
-                        let wallets = wallets.read().unwrap();
-                        stream.write(wallets.iter().map(|w| format!("{}\n", w)).collect::<Vec<String>>().join("").as_bytes()).unwrap();
-                    }
-                    // some way to remove addresses
-                    _ => continue
-                };
-            }
-        } else {
-            break;
+        match connection.read_message() {
+            Ok(ClientToNameserverMessage::Inform(socket_addr)) => {
+                let mut wallets = wallets.write().unwrap();
+                wallets.push(socket_addr);
+            },
+            Ok(ClientToNameserverMessage::Query) => {
+                let wallets = wallets.read().unwrap();
+                connection.write_message(&NameserverToClientMessage::Peers(wallets.clone())).unwrap();
+            },
+            Ok(_) => panic!("Unexpected client message"),
+            Err(e) => panic!("Error reading client message: {}", e),
         }
     }
     println!("disconnected")

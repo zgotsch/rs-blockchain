@@ -23,14 +23,13 @@ use std::sync::Mutex;
 
 use bincode::{serialize, deserialize, Infinite};
 
-mod block;
-use block::{Block};
-use block::check_chain;
+extern crate naivechain_rs;
+use naivechain_rs::block::{check_chain, Block};
 
-mod message;
-use message::{ClientMessage, NameServerMessage};
+use naivechain_rs::message;
+use message::{ClientMessage, ClientToNameserverMessage, NameserverToClientMessage};
 
-mod connection;
+use naivechain_rs::connection;
 use connection::Connection;
 
 
@@ -100,7 +99,7 @@ fn main() {
 
     // connect to nameserver
     let mut nameserver_stream = TcpStream::connect(nameserver_str).expect("Couldn't connet to nameserver");
-    nameserver_stream.set_read_timeout(Some(Duration::from_millis(500))).expect("Couldn't set read timeout");
+    let mut nameserver_connection = Connection::new(nameserver_stream);
 
     // load your chain
     let mut chainfile = OpenOptions::new()
@@ -138,26 +137,16 @@ fn main() {
     };
 
     // get peers
-    let mut resp = [0; 1024];
-    let peer_addrs_str = match nameserver_stream.read(&mut resp) {
-        Ok(count) => String::from_utf8_lossy(&resp[0..count]).into_owned(),
+    nameserver_connection.write_message(&ClientToNameserverMessage::Query);
+    let peer_addrs = match nameserver_connection.read_message() {
+        Ok(NameserverToClientMessage::Peers(peers)) => peers,
+        Ok(_) => panic!("Unexpected message from the nameserver"),
         Err(e) => panic!("Error reading from nameserver: {}", e),
     };
 
-    let mut peer_addrs = Vec::new();
-    for peer_addr_str in peer_addrs_str.lines() {
-        // HACK(zach): yuck, if there are no peers, we send an empty string (otherwise the read blocks)
-        if peer_addr_str == "" {
-            continue
-        }
-        let mut resolved = peer_addr_str.to_socket_addrs().unwrap();
-        assert!(resolved.len() == 1, "Entry from nameserver resolved to multiple addresses");
-        peer_addrs.push(resolved.next().unwrap());
-    }
-
     // inform nameserver
     let my_addr = listener.local_addr().expect("Couldn't get listening address");
-    nameserver_stream.write(&NameServerMessage::Inform(my_addr).encode());
+    nameserver_connection.write_message(&ClientToNameserverMessage::Inform(my_addr));
 
     // connect to peers
     let mut peers = Vec::new();

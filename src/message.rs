@@ -1,10 +1,6 @@
 use std::net::SocketAddr;
-use std::borrow::Cow;
 
 use block::{Block};
-
-type BlockBorrow<'a> = &'a Block;
-type BlockChainBorrow<'a> = &'a Vec<Block>;
 
 #[derive(Serialize, Deserialize)]
 pub enum ClientMessage {
@@ -13,16 +9,15 @@ pub enum ClientMessage {
     Chain(Vec<Block>),
 }
 
-pub enum NameServerMessage {
+#[derive(Serialize, Deserialize)]
+pub enum ClientToNameserverMessage {
     Inform(SocketAddr),
     Query,
+    Pong,
 }
 
-impl NameServerMessage {
-    pub fn encode(&self) -> Vec<u8> {
-        match self {
-            &NameServerMessage::Inform(addr) => format!("i {}", addr),
-            &NameServerMessage::Query => "q".to_string(),
-        }.as_bytes().to_vec()
-    }
+#[derive(Serialize, Deserialize)]
+pub enum NameserverToClientMessage {
+    Peers(Vec<SocketAddr>),
+    Ping,
 }

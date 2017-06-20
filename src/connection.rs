@@ -3,10 +3,8 @@ use std::io;
 use std::io::{Read, Write};
 use byteorder::{ByteOrder, NetworkEndian};
 use bincode::{serialize, deserialize, Infinite};
-use std::borrow::ToOwned;
-
-use message::{ClientMessage};
-
+use serde::ser::Serialize;
+use serde::de::DeserializeOwned;
 
 pub struct Connection {
     next_message_size: Option<u64>,
@@ -21,7 +19,7 @@ impl Connection {
         }
     }
 
-    pub fn write_message(&mut self, msg: &ClientMessage) -> io::Result<()> {
+    pub fn write_message<M>(&mut self, msg: &M) -> io::Result<()> where M: Serialize  {
         let serialized = serialize(msg, Infinite).unwrap();
 
         // first write size big endian
@@ -35,7 +33,7 @@ impl Connection {
         Ok(())
     }
 
-    pub fn read_message(&mut self) -> io::Result<ClientMessage> {
+    pub fn read_message<M>(&mut self) -> io::Result<M> where M: DeserializeOwned {
         // read the size of the payload
         let mut size_buf = [0; 8];
         self.stream.read_exact(&mut size_buf)?;
@@ -45,7 +43,7 @@ impl Connection {
         msg_buf.resize(size as usize, 0);
         self.stream.read_exact(&mut msg_buf)?;
 
-        let message: ClientMessage = deserialize(&msg_buf).unwrap();
+        let message: M = deserialize(&msg_buf).unwrap();
         return Ok(message);
     }
 }
