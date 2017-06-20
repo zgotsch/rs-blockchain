@@ -6,6 +6,7 @@ use std::env;
 use std::sync::Arc;
 use std::net::ToSocketAddrs;
 use std::sync::RwLock;
+use std::collections::HashMap;
 
 extern crate naivechain_rs;
 use naivechain_rs::message::{ClientMessage, ClientToNameserverMessage, NameserverToClientMessage};
@@ -24,7 +25,7 @@ fn main() {
     let listener = TcpListener::bind(("::", port)).expect("Unable to bind to socket");
     let addr = listener.local_addr().expect("unable to get the local port?");
 
-    let wallets: Arc<RwLock<Vec<SocketAddr>>> = Arc::new(RwLock::new(Vec::new()));
+    let wallets: Arc<RwLock<HashMap<SocketAddr, SocketAddr>>> = Arc::new(RwLock::new(HashMap::new()));
 
     println!("Listening on port {}", addr.port());
     for connection in listener.incoming() {
@@ -40,22 +41,44 @@ fn main() {
         }
     }
 }
-fn handle_client(mut connection: Connection, wallets: Arc<RwLock<Vec<SocketAddr>>>) {
-    println!("connection accepted");
+fn handle_client(mut connection: Connection, wallets: Arc<RwLock<HashMap<SocketAddr, SocketAddr>>>) {
+    let mut remote_addr;
+    match connection.peer_addr() {
+        Ok(addr) => {
+            remote_addr = addr;
+            let mut wallets = wallets.write().unwrap();
+            println!("Met {}", addr);
+        },
+        Err(e) => {
+            writeln!(std::io::stderr(), "Error getting peer address: {}", e).expect("Couldn't write error");
+            return;
+        },
+    }
     loop {
         match connection.read_message() {
             Ok(Some(ClientToNameserverMessage::Inform(socket_addr))) => {
                 let mut wallets = wallets.write().unwrap();
-                wallets.push(socket_addr);
+                wallets.insert(remote_addr, socket_addr);
             },
             Ok(Some(ClientToNameserverMessage::Query)) => {
                 let wallets = wallets.read().unwrap();
-                connection.write_message(&NameserverToClientMessage::Peers(wallets.clone())).unwrap();
+                let mut peer_addresses = wallets.clone();
+                peer_addresses.remove(&remote_addr);
+
+                connection.write_message(
+                    &NameserverToClientMessage::Peers(
+                        peer_addresses.into_iter().map(|(_, v)| v).collect()
+                    )
+                ).unwrap();
             },
             Ok(None) => break,
             Ok(_) => panic!("Unexpected client message"),
             Err(e) => panic!("Error reading client message: {}", e),
         }
     }
-    println!("disconnected")
+    {
+        let mut wallets = wallets.write().unwrap();
+        wallets.remove(&remote_addr);
+        println!("Lost {}", remote_addr);
+    }
 }

@@ -1,10 +1,11 @@
-use std::net::TcpStream;
+use std::net::{TcpStream, SocketAddr};
 use std::io;
 use std::io::{Read, Write};
 use byteorder::{ByteOrder, NetworkEndian};
 use bincode::{serialize, deserialize, Infinite};
 use serde::ser::Serialize;
 use serde::de::DeserializeOwned;
+
 
 pub struct Connection {
     next_message_size: Option<u64>,
@@ -17,6 +18,10 @@ impl Connection {
             next_message_size: None,
             stream: stream,
         }
+    }
+
+    pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+        self.stream.peer_addr()
     }
 
     pub fn write_message<M>(&mut self, msg: &M) -> io::Result<()> where M: Serialize  {
