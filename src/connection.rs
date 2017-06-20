@@ -33,17 +33,24 @@ impl Connection {
         Ok(())
     }
 
-    pub fn read_message<M>(&mut self) -> io::Result<M> where M: DeserializeOwned {
+    pub fn read_message<M>(&mut self) -> io::Result<Option<M>> where M: DeserializeOwned {
         // read the size of the payload
         let mut size_buf = [0; 8];
-        self.stream.read_exact(&mut size_buf)?;
-        let size = NetworkEndian::read_u64(&size_buf);
+        let bytes_read = self.stream.read(&mut size_buf)?;
 
-        let mut msg_buf = Vec::with_capacity(size as usize);
-        msg_buf.resize(size as usize, 0);
-        self.stream.read_exact(&mut msg_buf)?;
+        if bytes_read == 0 {
+            Ok(None)
+        } else if bytes_read != 8 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid message length"));
+        } else {
+            let size = NetworkEndian::read_u64(&size_buf);
 
-        let message: M = deserialize(&msg_buf).unwrap();
-        return Ok(message);
+            let mut msg_buf = Vec::with_capacity(size as usize);
+            msg_buf.resize(size as usize, 0);
+            self.stream.read_exact(&mut msg_buf)?;
+
+            let message: M = deserialize(&msg_buf).unwrap();
+            return Ok(Some(message));
+        }
     }
 }

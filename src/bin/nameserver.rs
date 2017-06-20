@@ -44,14 +44,15 @@ fn handle_client(mut connection: Connection, wallets: Arc<RwLock<Vec<SocketAddr>
     println!("connection accepted");
     loop {
         match connection.read_message() {
-            Ok(ClientToNameserverMessage::Inform(socket_addr)) => {
+            Ok(Some(ClientToNameserverMessage::Inform(socket_addr))) => {
                 let mut wallets = wallets.write().unwrap();
                 wallets.push(socket_addr);
             },
-            Ok(ClientToNameserverMessage::Query) => {
+            Ok(Some(ClientToNameserverMessage::Query)) => {
                 let wallets = wallets.read().unwrap();
                 connection.write_message(&NameserverToClientMessage::Peers(wallets.clone())).unwrap();
             },
+            Ok(None) => break,
             Ok(_) => panic!("Unexpected client message"),
             Err(e) => panic!("Error reading client message: {}", e),
         }

@@ -44,7 +44,7 @@ fn handle_peer(stream: TcpStream, chain: Arc<Mutex<Vec<Block>>>) {
         let incoming = connection.read_message();
         match incoming {
             Ok(msg) => match msg {
-                ClientMessage::QueryChain => {
+                Some(ClientMessage::QueryChain) => {
                     let chain = chain.lock().unwrap();
                     connection.write_message(&ClientMessage::Chain(chain.clone()));
                 },
@@ -139,7 +139,7 @@ fn main() {
     // get peers
     nameserver_connection.write_message(&ClientToNameserverMessage::Query);
     let peer_addrs = match nameserver_connection.read_message() {
-        Ok(NameserverToClientMessage::Peers(peers)) => peers,
+        Ok(Some(NameserverToClientMessage::Peers(peers))) => peers,
         Ok(_) => panic!("Unexpected message from the nameserver"),
         Err(e) => panic!("Error reading from nameserver: {}", e),
     };
@@ -168,7 +168,7 @@ fn main() {
     };
     for mut peer in peers {
         peer.write_message(&ClientMessage::QueryChain).unwrap();
-        if let ClientMessage::Chain(chain) = peer.read_message().unwrap() {
+        if let Some(ClientMessage::Chain(chain)) = peer.read_message().unwrap() {
             if check_chain(&chain) {
                 if chain.len() > candidate.len() {
                     candidate = chain;
