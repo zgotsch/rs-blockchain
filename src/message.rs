@@ -11,7 +11,7 @@ pub enum ClientMessage {
 
 #[derive(Serialize, Deserialize)]
 pub enum ClientToNameserverMessage {
-    Inform(SocketAddr),
+    Inform(u16),
     Query,
     Pong,
 }

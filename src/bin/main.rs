@@ -146,7 +146,7 @@ fn main() {
 
     // inform nameserver
     let my_addr = listener.local_addr().expect("Couldn't get listening address");
-    nameserver_connection.write_message(&ClientToNameserverMessage::Inform(my_addr));
+    nameserver_connection.write_message(&ClientToNameserverMessage::Inform(my_addr.port()));
 
     // connect to peers
     let mut peers = Vec::new();

@@ -42,11 +42,10 @@ fn main() {
     }
 }
 fn handle_client(mut connection: Connection, wallets: Arc<RwLock<HashMap<SocketAddr, SocketAddr>>>) {
-    let mut remote_addr;
+    let remote_addr;
     match connection.peer_addr() {
         Ok(addr) => {
             remote_addr = addr;
-            let mut wallets = wallets.write().unwrap();
             println!("Met {}", addr);
         },
         Err(e) => {
@@ -56,9 +55,12 @@ fn handle_client(mut connection: Connection, wallets: Arc<RwLock<HashMap<SocketA
     }
     loop {
         match connection.read_message() {
-            Ok(Some(ClientToNameserverMessage::Inform(socket_addr))) => {
+            Ok(Some(ClientToNameserverMessage::Inform(port))) => {
+                let mut addr = remote_addr.clone();
+                addr.set_port(port);
+
                 let mut wallets = wallets.write().unwrap();
-                wallets.insert(remote_addr, socket_addr);
+                wallets.insert(remote_addr, addr);
             },
             Ok(Some(ClientToNameserverMessage::Query)) => {
                 let wallets = wallets.read().unwrap();
