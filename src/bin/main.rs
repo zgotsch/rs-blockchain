@@ -72,6 +72,7 @@ fn handle_peer(connection: Arc<Mutex<Connection>>, chain: Arc<Mutex<Vec<Block>>>
                             {
                                 let mut my_chain = chain.lock().unwrap();
                                 if is_chain_better(&their_chain, &my_chain) {
+                                    println!("Accepted new chain from {}", connection.peer_addr().unwrap());
                                     *my_chain = their_chain;
                                 }
                             }
@@ -79,10 +80,11 @@ fn handle_peer(connection: Arc<Mutex<Connection>>, chain: Arc<Mutex<Vec<Block>>>
                         Some(ClientMessage::NewBlock(block)) => {
                             let mut chain = chain.lock().unwrap();
                             if block.previous_hash == chain.last().unwrap().hash {
-                                println!("Received block {}", block.block_num);
+                                println!("Received block {} from {}", block.block_num, connection.peer_addr().unwrap());
                                 chain.push(block);
                             } else {
                                 // something weird is going on, better check their whole chain
+                                println!("Received a block which doesn't match our chain");
                                 connection.write_message(&ClientMessage::QueryChain);
                             }
                         }
