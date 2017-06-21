@@ -38,21 +38,72 @@ fn print_usage(program: &str, opts: getopts::Options) {
     print!("{}", opts.usage(&brief));
 }
 
-fn handle_peer(stream: TcpStream, chain: Arc<Mutex<Vec<Block>>>) {
-    let mut connection = Connection::new(stream);
-    loop {
-        let incoming = connection.read_message();
-        match incoming {
-            Ok(msg) => match msg {
-                Some(ClientMessage::QueryChain) => {
-                    let chain = chain.lock().unwrap();
-                    connection.write_message(&ClientMessage::Chain(chain.clone()));
-                },
-                _ => {},
-            },
-            Err(_) => break
+fn is_chain_better(their_chain: &Vec<Block>, my_chain: &Vec<Block>) -> bool {
+    if check_chain(their_chain) {
+        if their_chain.len() > my_chain.len() {
+            return true;
         }
+        if their_chain.len() == my_chain.len() &&
+           their_chain.last().unwrap().timestamp > my_chain.last().unwrap().timestamp
+        {
+            return true;
+        }
+        return false;
     }
+    return false;
+}
+
+fn handle_peer(connection: Arc<Mutex<Connection>>, chain: Arc<Mutex<Vec<Block>>>) {
+    {
+        let connection = connection.clone();
+        thread::spawn(move || {
+            loop {
+                thread::sleep(Duration::from_millis(100));
+                // println!("reading!");
+                let mut connection = connection.lock().unwrap();
+                let incoming = connection.read_message();
+                match incoming {
+                    Ok(msg) => match msg {
+                        Some(ClientMessage::QueryChain) => {
+                            let chain = chain.lock().unwrap();
+                            connection.write_message(&ClientMessage::Chain(chain.clone()));
+                        },
+                        Some(ClientMessage::Chain(their_chain)) => {
+                            {
+                                let mut my_chain = chain.lock().unwrap();
+                                if is_chain_better(&their_chain, &my_chain) {
+                                    *my_chain = their_chain;
+                                }
+                            }
+                        },
+                        Some(ClientMessage::NewBlock(block)) => {
+                            let mut chain = chain.lock().unwrap();
+                            if block.previous_hash == chain.last().unwrap().hash {
+                                println!("Received block {}", block.block_num);
+                                chain.push(block);
+                            } else {
+                                // something weird is going on, better check their whole chain
+                                connection.write_message(&ClientMessage::QueryChain);
+                            }
+                        }
+                        None => {
+                            break;
+                        },
+                    },
+                    Err(e) => {
+                        if e.kind() == std::io::ErrorKind::WouldBlock {
+                            continue;
+                        } else {
+                            println!("breaking: {:?}", e.kind());
+                            break
+                        }
+                    }
+                }
+            }
+        });
+    }
+    let mut connection = connection.lock().unwrap();
+    connection.write_message(&ClientMessage::QueryChain).unwrap();
 }
 
 enum ReplCommand {
@@ -116,25 +167,10 @@ fn main() {
         deserialize(&chain_serialized).unwrap()
     }));
 
+    let mut peers: Arc<Mutex<Vec<Arc<Mutex<Connection>>>>> = Arc::new(Mutex::new(Vec::new()));
+
     // listen for peers
     let listener = Arc::new(TcpListener::bind(("::", 0)).expect("Unable to bind to socket"));
-    let listener_thread = {
-        let listener = listener.clone();
-        let chain = chain.clone();
-        thread::spawn(move || {
-            for connection in listener.incoming() {
-                match connection {
-                    Ok(stream) => {
-                        let chain = chain.clone();
-                        thread::spawn(|| {
-                            handle_peer(stream, chain);
-                        });
-                        println!("new connection")},
-                    Err(e) => writeln!(std::io::stderr(), "{}", e).expect("Couldn't write error"),
-                }
-            }
-        })
-    };
 
     // get peers
     nameserver_connection.write_message(&ClientToNameserverMessage::Query);
@@ -144,45 +180,56 @@ fn main() {
         Err(e) => panic!("Error reading from nameserver: {}", e),
     };
 
+    {
+        let mut peers = peers.lock().unwrap();
+        for addr in peer_addrs {
+            match TcpStream::connect(addr) {
+                Ok(stream) => {
+                    stream.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+                    let connection = Arc::new(Mutex::new(Connection::new(stream)));
+                    {
+                        let chain = chain.clone();
+                        let connection = connection.clone();
+                        handle_peer(connection, chain);
+                    }
+                    peers.push(connection);
+                }
+                Err(e) => {
+                    println!("{} is dead: {}", addr, e);
+                }
+            }
+        }
+    }
+
+    let listener_thread = {
+        let listener = listener.clone();
+        let chain = chain.clone();
+        let peers = peers.clone();
+        thread::spawn(move || {
+            for connection in listener.incoming() {
+                match connection {
+                    Ok(stream) => {
+                        stream.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+                        let connection = Arc::new(Mutex::new(Connection::new(stream)));
+                        {
+                            let mut peers = peers.lock().unwrap();
+                            let connection = connection.clone();
+                            peers.push(connection);
+                        }
+                        {
+                            let chain = chain.clone();
+                            handle_peer(connection, chain);
+                        }
+                        println!("new connection")},
+                    Err(e) => writeln!(std::io::stderr(), "{}", e).expect("Couldn't write error"),
+                }
+            }
+        })
+    };
+
     // inform nameserver
     let my_addr = listener.local_addr().expect("Couldn't get listening address");
     nameserver_connection.write_message(&ClientToNameserverMessage::Inform(my_addr.port()));
-
-    // connect to peers
-    let mut peers = Vec::new();
-    for addr in peer_addrs {
-        match TcpStream::connect(addr) {
-            Ok(stream) => {
-                peers.push(Connection::new(stream));
-            }
-            Err(e) => {
-                println!("{} is dead: {}", addr, e);
-            }
-        }
-    }
-
-    // get chains from peers
-    let mut candidate = {
-        let chain = chain.lock().unwrap();
-        chain.clone()
-    };
-    for mut peer in peers {
-        peer.write_message(&ClientMessage::QueryChain).unwrap();
-        if let Some(ClientMessage::Chain(chain)) = peer.read_message().unwrap() {
-            if check_chain(&chain) {
-                if chain.len() > candidate.len() {
-                    candidate = chain;
-                } else if chain.len() == candidate.len() &&
-                          chain.last().unwrap().timestamp < candidate.last().unwrap().timestamp
-                {
-                    candidate = chain;
-                }
-            }
-        } else {
-            panic!("Unexpected message from peer");
-        }
-    }
-    *chain.lock().unwrap() = candidate;
 
     // launch repl
     let repl_thread = {
@@ -199,7 +246,15 @@ fn main() {
                         let mut chain = chain.lock().unwrap();
                         let new_block = Block::new(chain.last().unwrap(), [0; 1024]);
                         let block_num = new_block.block_num;
-                        chain.push(new_block);
+                        chain.push(new_block.clone());
+
+                        {
+                            let peers = peers.lock().unwrap();
+                            for peer in peers.iter() {
+                                let mut peer = peer.lock().unwrap();
+                                peer.write_message(&ClientMessage::NewBlock(new_block.clone()));
+                            }
+                        }
                         println!("Created block {}", block_num);
                     },
                     Ok(ReplCommand::Exit) => {std::process::exit(0);}

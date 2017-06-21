@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use block::{Block};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum ClientMessage {
     NewBlock(Block),
     QueryChain,
