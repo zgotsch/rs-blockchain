@@ -53,6 +53,13 @@ fn is_chain_better(their_chain: &Vec<Block>, my_chain: &Vec<Block>) -> bool {
     return false;
 }
 
+fn ns_to_spec(ns: u64) -> time::Timespec {
+    time::Timespec{
+        sec: (ns / 1_000_000_000) as i64,
+        nsec: (ns % 1_000_000_000) as i32
+    }
+}
+
 fn handle_peer(connection: Arc<Mutex<Connection>>, chain: Arc<Mutex<Vec<Block>>>) {
     {
         let connection = connection.clone();
@@ -112,18 +119,45 @@ enum ReplCommand {
     NewBlock,
     ShowChain,
     Exit,
-    // ListPeers,
+    ListPeers,
+    Latest,
+    Help,
 }
 
-fn parse(input: String) -> Result<ReplCommand, String> {
-    match input.split_whitespace().next() {
-        Some("block") => Ok(ReplCommand::NewBlock),
-        Some("chain") => Ok(ReplCommand::ShowChain),
-        Some("exit") => Ok(ReplCommand::Exit),
-        Some(_) => Err("Unrecognized input".to_string()),
-        None => Err("no input".to_string()),
+impl ReplCommand {
+    fn variants() -> std::slice::Iter<'static, ReplCommand> {
+        static VARIANTS: &'static [ReplCommand] = &[
+            ReplCommand::NewBlock, ReplCommand::ShowChain, ReplCommand::ListPeers,
+            ReplCommand::Latest, ReplCommand::Exit, ReplCommand::Help];
+        return VARIANTS.iter();
+    }
+
+    fn parse(input: String) -> Result<ReplCommand, String> {
+        match input.split_whitespace().next() {
+            Some("block") => Ok(ReplCommand::NewBlock),
+            Some("chain") => Ok(ReplCommand::ShowChain),
+            Some("exit") => Ok(ReplCommand::Exit),
+            Some("peers") => Ok(ReplCommand::ListPeers),
+            Some("latest") => Ok(ReplCommand::Latest),
+            Some("help") => Ok(ReplCommand::Help),
+            Some(_) => Err("Unrecognized input".to_string()),
+            None => Err("no input".to_string()),
+        }
+    }
+
+    fn help_string(&self) -> String {
+        match self {
+            &ReplCommand::NewBlock => "block - create a new block",
+            &ReplCommand::ShowChain => "chain - print the chain",
+            &ReplCommand::Exit => "exit - close the client",
+            &ReplCommand::ListPeers => "peers - list the connected peers",
+            &ReplCommand::Latest => "latest - show some info about the latest block",
+            &ReplCommand::Help => "help - display this list",
+        }.to_string()
     }
 }
+
+
 
 
 fn main() {
@@ -242,8 +276,8 @@ fn main() {
                 std::io::stdout().flush().unwrap();
                 let mut input = String::new();
                 std::io::stdin().read_line(&mut input).unwrap();
-                match parse(input) {
-                    Ok(ReplCommand::ShowChain) => {println!("{:#?}", *chain.lock().unwrap());}
+                match ReplCommand::parse(input) {
+                    Ok(ReplCommand::ShowChain) => {println!("{:#?}", *chain.lock().unwrap());},
                     Ok(ReplCommand::NewBlock) => {
                         let mut chain = chain.lock().unwrap();
                         let new_block = Block::new(chain.last().unwrap(), [0; 1024]);
@@ -259,8 +293,26 @@ fn main() {
                         }
                         println!("Created block {}", block_num);
                     },
-                    Ok(ReplCommand::Exit) => {std::process::exit(0);}
-                    Ok(_) => {println!("Unhandled command");}
+                    Ok(ReplCommand::Help) => {
+                        for variant in ReplCommand::variants() {
+                            println!("{}", variant.help_string());
+                        }
+                    },
+                    Ok(ReplCommand::ListPeers) => {
+                        let peers = peers.lock().unwrap();
+                        for peer in peers.iter() {
+                            let peer = peer.lock().unwrap();
+                            println!("{}", peer.peer_addr().unwrap());
+                        }
+                    },
+                    Ok(ReplCommand::Latest) => {
+                        let chain = chain.lock().unwrap();
+                        let last = chain.last().unwrap();
+                        println!("Block number {} created at {}",
+                            last.block_num, time::at(ns_to_spec(last.timestamp)).rfc822());
+                    },
+                    Ok(ReplCommand::Exit) => {std::process::exit(0);},
+                    Ok(_) => {println!("Unhandled command");},
                     Err(e) => {println!("Error: {}", e);}
                 }
             }

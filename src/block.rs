@@ -135,10 +135,17 @@ fn make_hash(block_num: u64, previous_hash: Hash32Byte, timestamp: u64, data: [u
     return Hash32Byte(output);
 }
 
+fn ns(time: &time::Tm) -> u64 {
+    let spec = time.to_timespec();
+    return (spec.sec * 1_000_000_000 + (spec.nsec as i64)) as u64;
+}
+
 impl Block {
     pub fn new(past_block: &Block, data: [u8; 1024]) -> Block {
         let block_num = past_block.block_num + 1;
-        let ts = time::precise_time_ns();
+        let now = time::now_utc();
+        let ts = ns(&now);
+
         Block{
             block_num: block_num,
             previous_hash: past_block.hash,
