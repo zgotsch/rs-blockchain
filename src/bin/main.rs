@@ -18,8 +18,7 @@ use std::net::{TcpStream, TcpListener};
 use std::net::ToSocketAddrs;
 use std::time::Duration;
 use std::thread;
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::mpsc;
 
 use bincode::{serialize, deserialize, Infinite};
 
@@ -44,8 +43,7 @@ fn is_chain_better(their_chain: &Vec<Block>, my_chain: &Vec<Block>) -> bool {
             return true;
         }
         if their_chain.len() == my_chain.len() &&
-           their_chain.last().unwrap().timestamp > my_chain.last().unwrap().timestamp
-        {
+           their_chain.last().unwrap().timestamp > my_chain.last().unwrap().timestamp {
             return true;
         }
         return false;
@@ -54,65 +52,10 @@ fn is_chain_better(their_chain: &Vec<Block>, my_chain: &Vec<Block>) -> bool {
 }
 
 fn ns_to_spec(ns: u64) -> time::Timespec {
-    time::Timespec{
+    time::Timespec {
         sec: (ns / 1_000_000_000) as i64,
-        nsec: (ns % 1_000_000_000) as i32
+        nsec: (ns % 1_000_000_000) as i32,
     }
-}
-
-fn handle_peer(connection: Arc<Mutex<Connection>>, chain: Arc<Mutex<Vec<Block>>>) {
-    {
-        let connection = connection.clone();
-        thread::spawn(move || {
-            loop {
-                thread::sleep(Duration::from_millis(100));
-                // println!("reading!");
-                let mut connection = connection.lock().unwrap();
-                let incoming = connection.read_message();
-                match incoming {
-                    Ok(msg) => match msg {
-                        Some(ClientMessage::QueryChain) => {
-                            let chain = chain.lock().unwrap();
-                            connection.write_message(&ClientMessage::Chain(chain.clone()));
-                        },
-                        Some(ClientMessage::Chain(their_chain)) => {
-                            {
-                                let mut my_chain = chain.lock().unwrap();
-                                if is_chain_better(&their_chain, &my_chain) {
-                                    println!("Accepted new chain from {}", connection.peer_addr().unwrap());
-                                    *my_chain = their_chain;
-                                }
-                            }
-                        },
-                        Some(ClientMessage::NewBlock(block)) => {
-                            let mut chain = chain.lock().unwrap();
-                            if block.previous_hash == chain.last().unwrap().hash {
-                                println!("Received block {} from {}", block.block_num, connection.peer_addr().unwrap());
-                                chain.push(block);
-                            } else {
-                                // something weird is going on, better check their whole chain
-                                println!("Received a block which doesn't match our chain");
-                                connection.write_message(&ClientMessage::QueryChain);
-                            }
-                        }
-                        None => {
-                            break;
-                        },
-                    },
-                    Err(e) => {
-                        if e.kind() == std::io::ErrorKind::WouldBlock {
-                            continue;
-                        } else {
-                            println!("breaking: {:?}", e.kind());
-                            break
-                        }
-                    }
-                }
-            }
-        });
-    }
-    let mut connection = connection.lock().unwrap();
-    connection.write_message(&ClientMessage::QueryChain).unwrap();
 }
 
 enum ReplCommand {
@@ -126,9 +69,12 @@ enum ReplCommand {
 
 impl ReplCommand {
     fn variants() -> std::slice::Iter<'static, ReplCommand> {
-        static VARIANTS: &'static [ReplCommand] = &[
-            ReplCommand::NewBlock, ReplCommand::ShowChain, ReplCommand::ListPeers,
-            ReplCommand::Latest, ReplCommand::Exit, ReplCommand::Help];
+        static VARIANTS: &'static [ReplCommand] = &[ReplCommand::NewBlock,
+                                                    ReplCommand::ShowChain,
+                                                    ReplCommand::ListPeers,
+                                                    ReplCommand::Latest,
+                                                    ReplCommand::Exit,
+                                                    ReplCommand::Help];
         return VARIANTS.iter();
     }
 
@@ -153,10 +99,124 @@ impl ReplCommand {
             &ReplCommand::ListPeers => "peers - list the connected peers",
             &ReplCommand::Latest => "latest - show some info about the latest block",
             &ReplCommand::Help => "help - display this list",
-        }.to_string()
+        }
+        .to_string()
     }
 }
 
+
+struct State {
+    peers: Vec<Connection>,
+    chain: Vec<Block>,
+    repl_input_rx: mpsc::Receiver<String>,
+    new_connections_rx: mpsc::Receiver<Connection>,
+}
+
+impl State {
+    fn poll_repl(&mut self) -> Result<(), mpsc::TryRecvError>  {
+        let input = self.repl_input_rx.try_recv()?;
+
+        match ReplCommand::parse(input) {
+            Ok(ReplCommand::ShowChain) => {
+                println!("{:#?}", self.chain);
+            }
+            Ok(ReplCommand::NewBlock) => {
+                let new_block = Block::new(self.chain.last().unwrap(), [0; 1024]);
+                let block_num = new_block.block_num;
+                self.chain.push(new_block.clone());
+
+                {
+                    for peer in self.peers.iter_mut() {
+                        peer.write_message(&ClientMessage::NewBlock(new_block.clone()));
+                    }
+                }
+                println!("Created block {}", block_num);
+            }
+            Ok(ReplCommand::Help) => {
+                for variant in ReplCommand::variants() {
+                    println!("{}", variant.help_string());
+                }
+            }
+            Ok(ReplCommand::ListPeers) => {
+                for peer in self.peers.iter() {
+                    println!("{}", peer.peer_addr().unwrap());
+                }
+            }
+            Ok(ReplCommand::Latest) => {
+                let last = self.chain.last().unwrap();
+                println!("Block number {} created at {}",
+                         last.block_num,
+                         time::at(ns_to_spec(last.timestamp)).rfc822());
+            }
+            Ok(ReplCommand::Exit) => {
+                std::process::exit(0);
+            }
+            Err(e) => {
+                println!("Error: {}", e);
+            }
+        }
+        print!("> ");
+        std::io::stdout().flush().unwrap();
+        Ok(())
+    }
+
+    fn add_peer(&mut self, mut peer: Connection) {
+        println!("!!!!!");
+        peer.write_message(&ClientMessage::QueryChain).unwrap();
+        println!("Added peer");
+        self.peers.push(peer);
+    }
+
+    fn poll_listener(&mut self) -> Result<(), mpsc::TryRecvError> {
+        let peer = self.new_connections_rx.try_recv()?;
+        self.add_peer(peer);
+        Ok(())
+    }
+
+    fn poll_peers(&mut self) {
+        for mut peer in self.peers.iter_mut() {
+            let incoming = peer.read_message();
+            match incoming {
+                Ok(msg) => {
+                    match msg {
+                        Some(ClientMessage::QueryChain) => {
+                            peer.write_message(&ClientMessage::Chain(self.chain.clone()));
+                        }
+                        Some(ClientMessage::Chain(their_chain)) => {
+                            if is_chain_better(&their_chain, &self.chain) {
+                                println!("Accepted new chain from {}", peer.peer_addr().unwrap());
+                                self.chain = their_chain;
+                            }
+                        }
+                        Some(ClientMessage::NewBlock(block)) => {
+                            if block.previous_hash == self.chain.last().unwrap().hash {
+                                println!("Received block {} from {}",
+                                         block.block_num,
+                                         peer.peer_addr().unwrap());
+                                self.chain.push(block);
+                            } else {
+                                // something weird is going on, better check their whole chain
+                                println!("Received a block which doesn't match our chain");
+                                peer.write_message(&ClientMessage::QueryChain);
+                            }
+                        }
+                        None => {
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::WouldBlock {
+                        continue;
+                    } else {
+                        println!("breaking: {:?}", e.kind());
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
 
 
 
@@ -185,30 +245,65 @@ fn main() {
     let nameserver_str = matches.opt_str("n").expect("Missing nameserver address.");
 
     // connect to nameserver
-    let mut nameserver_stream = TcpStream::connect(nameserver_str).expect("Couldn't connet to nameserver");
+    let nameserver_stream = TcpStream::connect(nameserver_str)
+                                    .expect("Couldn't connet to nameserver");
     let mut nameserver_connection = Connection::new(nameserver_stream);
 
     // load your chain
     let mut chainfile = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(chainfile_name)
-            .unwrap();
+                            .read(true)
+                            .write(true)
+                            .create(true)
+                            .open(chainfile_name)
+                            .unwrap();
     let mut chain_serialized = Vec::new();
     chainfile.read_to_end(&mut chain_serialized).expect("Couldn't read chain file");
-    let chain: Arc<Mutex<Vec<Block>>> = Arc::new(Mutex::new(if chain_serialized.len() == 0 {
+    let chain: Vec<Block> = if chain_serialized.len() == 0 {
         vec![Block::genesis()]
     } else {
         deserialize(&chain_serialized).unwrap()
-    }));
-
-    let mut peers: Arc<Mutex<Vec<Arc<Mutex<Connection>>>>> = Arc::new(Mutex::new(Vec::new()));
+    };
 
     // listen for peers
-    let listener = Arc::new(TcpListener::bind(("::", 0)).expect("Unable to bind to socket"));
+    let listener = TcpListener::bind(("::", 0)).expect("Unable to bind to socket");
 
-    // get peers
+    let (new_connections_tx, new_connections_rx) = mpsc::channel();
+
+    let my_addr = listener.local_addr().expect("Couldn't get listening address");
+    let listener_thread = {
+        thread::spawn(move || {
+            for connection in listener.incoming() {
+                match connection {
+                    Ok(stream) => {
+                        stream.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+                        let connection = Connection::new(stream);
+                        println!("new connection");
+                        new_connections_tx.send(connection);
+                    }
+                    Err(e) => writeln!(std::io::stderr(), "{}", e).expect("Couldn't write error"),
+                }
+            }
+        })
+    };
+
+    let (repl_input_tx, repl_input_rx) = mpsc::channel();
+    let repl_thread = {
+        thread::spawn(move ||{
+            let stdin = std::io::stdin();
+            for line in stdin.lock().lines() {
+                repl_input_tx.send(line.unwrap());
+            }
+        })
+    };
+
+    let mut state = State {
+        peers: vec![],
+        new_connections_rx,
+        chain,
+        repl_input_rx,
+    };
+
+    // initialize peers from name server
     nameserver_connection.write_message(&ClientToNameserverMessage::Query);
     let peer_addrs = match nameserver_connection.read_message() {
         Ok(Some(NameserverToClientMessage::Peers(peers))) => peers,
@@ -216,109 +311,25 @@ fn main() {
         Err(e) => panic!("Error reading from nameserver: {}", e),
     };
 
-    {
-        let mut peers = peers.lock().unwrap();
-        for addr in peer_addrs {
-            match TcpStream::connect(addr) {
-                Ok(stream) => {
-                    stream.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
-                    let connection = Arc::new(Mutex::new(Connection::new(stream)));
-                    {
-                        let chain = chain.clone();
-                        let connection = connection.clone();
-                        handle_peer(connection, chain);
-                    }
-                    peers.push(connection);
-                }
-                Err(e) => {
-                    println!("{} is dead: {}", addr, e);
-                }
+    for addr in peer_addrs {
+        match TcpStream::connect(addr) {
+            Ok(stream) => {
+                stream.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+                let peer = Connection::new(stream);
+                state.add_peer(peer);
+            }
+            Err(e) => {
+                println!("{} is dead: {}", addr, e);
             }
         }
     }
+    println!("Initialized peers");
 
-    let listener_thread = {
-        let listener = listener.clone();
-        let chain = chain.clone();
-        let peers = peers.clone();
-        thread::spawn(move || {
-            for connection in listener.incoming() {
-                match connection {
-                    Ok(stream) => {
-                        stream.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
-                        let connection = Arc::new(Mutex::new(Connection::new(stream)));
-                        {
-                            let mut peers = peers.lock().unwrap();
-                            let connection = connection.clone();
-                            peers.push(connection);
-                        }
-                        {
-                            let chain = chain.clone();
-                            handle_peer(connection, chain);
-                        }
-                        println!("new connection")},
-                    Err(e) => writeln!(std::io::stderr(), "{}", e).expect("Couldn't write error"),
-                }
-            }
-        })
-    };
+
 
     // inform nameserver
-    let my_addr = listener.local_addr().expect("Couldn't get listening address");
     nameserver_connection.write_message(&ClientToNameserverMessage::Inform(my_addr.port()));
-
-    // launch repl
-    let repl_thread = {
-        let chain = chain.clone();
-        thread::spawn(move || {
-            loop {
-                print!("> ");
-                std::io::stdout().flush().unwrap();
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input).unwrap();
-                match ReplCommand::parse(input) {
-                    Ok(ReplCommand::ShowChain) => {println!("{:#?}", *chain.lock().unwrap());},
-                    Ok(ReplCommand::NewBlock) => {
-                        let mut chain = chain.lock().unwrap();
-                        let new_block = Block::new(chain.last().unwrap(), [0; 1024]);
-                        let block_num = new_block.block_num;
-                        chain.push(new_block.clone());
-
-                        {
-                            let peers = peers.lock().unwrap();
-                            for peer in peers.iter() {
-                                let mut peer = peer.lock().unwrap();
-                                peer.write_message(&ClientMessage::NewBlock(new_block.clone()));
-                            }
-                        }
-                        println!("Created block {}", block_num);
-                    },
-                    Ok(ReplCommand::Help) => {
-                        for variant in ReplCommand::variants() {
-                            println!("{}", variant.help_string());
-                        }
-                    },
-                    Ok(ReplCommand::ListPeers) => {
-                        let peers = peers.lock().unwrap();
-                        for peer in peers.iter() {
-                            let peer = peer.lock().unwrap();
-                            println!("{}", peer.peer_addr().unwrap());
-                        }
-                    },
-                    Ok(ReplCommand::Latest) => {
-                        let chain = chain.lock().unwrap();
-                        let last = chain.last().unwrap();
-                        println!("Block number {} created at {}",
-                            last.block_num, time::at(ns_to_spec(last.timestamp)).rfc822());
-                    },
-                    Ok(ReplCommand::Exit) => {std::process::exit(0);},
-                    Ok(_) => {println!("Unhandled command");},
-                    Err(e) => {println!("Error: {}", e);}
-                }
-            }
-        })
-    };
-
+    println!("Registered with name server");
 
 
 
@@ -353,7 +364,16 @@ fn main() {
     //
     // let deserialized : Vec<Block> = deserialize(&serialized).unwrap();
     // println!("deserialized successfully? {:#?}", deserialized);
+    //
 
-    repl_thread.join();
+
+    println!(">");
+    loop {
+        state.poll_repl();
+        state.poll_listener();
+        state.poll_peers();
+    }
+
     listener_thread.join();
+    repl_thread.join();
 }
